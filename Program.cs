@@ -17,8 +17,8 @@ namespace NameCheapDNSUpdate
 
 
         //globals
-        public static int intCheckTimerSEC = Convert.ToInt32(Environment.GetEnvironmentVariable("intCheckTimerSEC").Trim());  //environmental variable, interval of how long to wait to check again
-        public static int intCheckTimerMS = intCheckTimerSEC * 1000;  //same as above just for Milliseconds for the timer
+        public static int intCheckTimerSEC;  //environmental variable, interval of how long to wait to check again
+        public static int intCheckTimerMS;  //same as above just for Milliseconds for the timer
 
         public static string strPublicIP = "0.0.0.0";  //initial public IP, bogus to force a check at startup.
 
@@ -160,15 +160,9 @@ namespace NameCheapDNSUpdate
 
             //inializations
             //intCheckTimerSEC
-            try
-            {
-                intCheckTimerSEC = Convert.ToInt32(Environment.GetEnvironmentVariable("intCheckTimerSEC").Trim());  //environmental variable, interval of how long to wait to check again
-            }
-            catch (Exception e)
+            if (!TryInitializeCheckTimer())
             {
                 returnVal = false;
-                Console.WriteLine("Error Processing intCheckTimerSEC ENV.");
-
             }
 
             //strDomain
@@ -233,6 +227,28 @@ namespace NameCheapDNSUpdate
 
             return returnVal;
 
+        }
+
+        private static bool TryInitializeCheckTimer()
+        {
+            var timerValue = Environment.GetEnvironmentVariable("intCheckTimerSEC");
+
+            if (string.IsNullOrWhiteSpace(timerValue))
+            {
+                Console.WriteLine("intCheckTimerSEC environment variable cannnot be blank.");
+                return false;
+            }
+
+            if (!int.TryParse(timerValue.Trim(), out var parsedSeconds))
+            {
+                Console.WriteLine("Error Processing intCheckTimerSEC ENV.");
+                return false;
+            }
+
+            intCheckTimerSEC = parsedSeconds;
+            intCheckTimerMS = intCheckTimerSEC * 1000;
+
+            return true;
         }
 
         public static string getPublicIP()
