@@ -82,4 +82,4 @@ Feel free to open issues or submit pull requests. All contributions are welcome.
 
 ## License
 
-MIT.
+MIT. See [LICENSE](LICENSE).
