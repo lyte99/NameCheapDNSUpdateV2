@@ -378,9 +378,8 @@ namespace NameCheapDNSUpdate
                     }
                     else if (deserializedContentData.ErrCount > 0)
                     {
-                        //the response carries no credentials, so it is safe to log in full
                         Console.WriteLine("Update Errors:" + deserializedContentData.Errors);
-                        Console.WriteLine("Full Return Content: " + content);
+                        Console.WriteLine("Full Return Content: " + Scrub(content, appPassword));
                         allSucceeded = false;
                     }
                     else
@@ -391,7 +390,8 @@ namespace NameCheapDNSUpdate
                 }
                 catch (Exception e)
                 {
-                    Console.WriteLine("Error in Update Request: " + e.Message);
+                    //an HTTP exception can quote the request it failed on, so scrub it too
+                    Console.WriteLine("Error in Update Request: " + Scrub(e.Message, appPassword));
                     allSucceeded = false;
                 }
 
@@ -401,6 +401,21 @@ namespace NameCheapDNSUpdate
 
             return allSucceeded;
 
+        }
+
+        //last line of defence before anything derived from a request reaches the log.
+        //the password should never appear in a response or an error, but assuming that
+        //is how it ended up in the log in the first place.
+        static string Scrub(string text, string secret)
+        {
+            if (string.IsNullOrEmpty(secret))
+            {
+                return text;
+            }
+
+            return text
+                .Replace(secret, "REDACTED")
+                .Replace(Uri.EscapeDataString(secret), "REDACTED");
         }
 
         static string BuildUpdateUrl(string host, string domainName, string ip, string password)
