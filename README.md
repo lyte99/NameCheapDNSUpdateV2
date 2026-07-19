@@ -32,11 +32,16 @@ All configuration comes from environment variables. All four are required.
 | --- | --- | --- |
 | `domain` | Fully qualified domain to update | `example.com` |
 | `hosts` | Hosts to update, separated by semicolons | `@;www` |
+
 | `dynamicDNSPassword` | Dynamic DNS password from NameCheap | `abc123...` |
 | `intCheckTimerSEC` | Seconds between checks, 1 to 86400 | `300` |
 
 The application validates all four at startup and exits with a non-zero status if any are missing
 or malformed.
+
+`hosts` accepts `@` for the root of the domain and `*` for a wildcard record, alongside ordinary
+labels such as `www`. Entries are limited to letters, digits, `-`, `_`, `.`, `@` and `*`; anything
+else is rejected at startup rather than silently corrupting the request.
 
 `dynamicDNSPassword` is a credential. Pass it in at run time and keep it out of the image, out of
 source control, and out of any shell history you keep around.

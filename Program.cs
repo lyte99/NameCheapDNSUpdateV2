@@ -93,7 +93,9 @@ namespace NameCheapDNSUpdate
                     //leave the state unknown on failure so the next cycle retries
                     strLastPublishedIP = updated ? currentIP : null;
 
-                    Console.WriteLine("DNS Update Complete");
+                    Console.WriteLine(updated
+                        ? "DNS Update Complete"
+                        : "DNS Update failed, will retry in " + intCheckTimerSEC + " seconds.");
                 }
                 else
                 {
@@ -179,6 +181,16 @@ namespace NameCheapDNSUpdate
                 Console.WriteLine("hosts environment variable cannnot be blank.");
                 returnVal = false;
             }
+            else
+            {
+                //hosts go into the query unescaped so '@' and '*' survive, so reject anything
+                //that could break out of the parameter
+                foreach (var host in strHosts.Where(host => !IsValidHost(host)))
+                {
+                    Console.WriteLine("hosts entry '" + host + "' contains unsupported characters.");
+                    returnVal = false;
+                }
+            }
 
             if (strDynamicDNSPassword == "")
             {
@@ -195,6 +207,15 @@ namespace NameCheapDNSUpdate
 
             return returnVal;
 
+        }
+
+        static bool IsValidHost(string host)
+        {
+            //'@' means the root of the domain and '*' is a wildcard record, both are legal
+            //unencoded in a query string
+            return host.Length > 0
+                && host.All(c => char.IsAsciiLetterOrDigit(c)
+                    || c == '-' || c == '_' || c == '.' || c == '@' || c == '*');
         }
 
         private static bool TryInitializeCheckTimer()
@@ -270,12 +291,19 @@ namespace NameCheapDNSUpdate
                 && parsed.AddressFamily == AddressFamily.InterNetwork;
         }
 
+        //'@' is the API's name for the root of the domain, it is not a DNS label,
+        //so '@.example.com' would never resolve
+        public static string FullHostName(string host, Domain domain)
+        {
+            return host == "@" ? domain.fullName : host + "." + domain.fullName;
+        }
+
         public static string? ResolveHostName(string host, Domain domain)
         {
             IPHostEntry hostEntry;
 
             //full hostname
-            var hostName = host + "." + domain.fullName;
+            var hostName = FullHostName(host, domain);
 
             Console.WriteLine("Attempting to resolve " + hostName);
 
@@ -320,7 +348,7 @@ namespace NameCheapDNSUpdate
             //loop through each host and set the Update URL
             foreach (var host in domainToRun.Hosts)
             {
-                Console.WriteLine("Updating host: " + host + "." + domainToRun.fullName);
+                Console.WriteLine("Updating host: " + FullHostName(host, domainToRun));
 
                 //update the IP for all hosts on the domain
                 string URL = BuildUpdateUrl(host, domainToRun.fullName, newIPAddress, appPassword);
@@ -350,7 +378,9 @@ namespace NameCheapDNSUpdate
                     }
                     else if (deserializedContentData.ErrCount > 0)
                     {
+                        //the response carries no credentials, so it is safe to log in full
                         Console.WriteLine("Update Errors:" + deserializedContentData.Errors);
+                        Console.WriteLine("Full Return Content: " + content);
                         allSucceeded = false;
                     }
                     else
@@ -365,9 +395,9 @@ namespace NameCheapDNSUpdate
                     allSucceeded = false;
                 }
 
-                Console.WriteLine("Host List Complete");
-
             }
+
+            Console.WriteLine("Host List Complete");
 
             return allSucceeded;
 
@@ -375,9 +405,12 @@ namespace NameCheapDNSUpdate
 
         static string BuildUpdateUrl(string host, string domainName, string ip, string password)
         {
-            //values are escaped, an unencoded '&' or '#' in a password silently corrupts the query
+            //values are escaped, an unencoded '&' or '#' in a password silently corrupts the query.
+            //host is the exception: '@' (root) and '*' (wildcard) are meaningful to the API and are
+            //legal unencoded in a query, so escaping them to %40/%2A would change what we ask for.
+            //startupCheck restricts hosts to characters that cannot break the query.
             return @"https://dynamicdns.park-your-domain.com/update?"
-                + "host=" + Uri.EscapeDataString(host)
+                + "host=" + host
                 + "&domain=" + Uri.EscapeDataString(domainName)
                 + "&password=" + Uri.EscapeDataString(password)
                 + "&ip=" + Uri.EscapeDataString(ip);
