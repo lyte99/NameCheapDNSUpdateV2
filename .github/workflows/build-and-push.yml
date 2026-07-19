@@ -1,0 +1,65 @@
+name: Build and Push Image
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v6
+
+      # --- .NET build (fails on any compiler warning) ---
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Restore
+        run: dotnet restore NameChapDNSUpdateV2.csproj
+
+      - name: Build
+        run: dotnet build NameChapDNSUpdateV2.csproj -c Release --no-restore -warnaserror
+
+      # --- Dockerfile lint using hadolint container ---
+      # NOTE: the Dockerfile in this repo is lowercase "dockerfile"
+      - name: Lint Dockerfile
+        run: docker run --rm -i -e HADOLINT_FAILURE_THRESHOLD=error hadolint/hadolint < dockerfile
+
+      # --- Build system ---
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # GHCR image names must be lowercase; derive it from the repo path
+      - name: Compute image name
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
+      - name: Build and push (amd64 + arm64)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          tags: |
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:${{ github.sha }}
+            ${{ github.ref_type == 'tag' && format('{0}:{1}', env.IMAGE, github.ref_name) || '' }}
