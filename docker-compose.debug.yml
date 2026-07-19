@@ -1,18 +1,15 @@
-# Please refer https://aka.ms/HTTPSinContainer on how to setup an https developer certificate for your ASP.NET Core service.
-
-version: '3.4'
-
 services:
   namechapdnsupdatev2:
     image: namechapdnsupdatev2
     build:
       context: .
-      dockerfile: ./Dockerfile
+      dockerfile: ./dockerfile
       args:
         - configuration=Debug
-    ports:
-      - 5000:5000
     environment:
-      - ASPNETCORE_ENVIRONMENT=Development
+      - intCheckTimerSEC=${intCheckTimerSEC:-300}
+      - domain=${domain}
+      - hosts=${hosts}
+      - dynamicDNSPassword=${dynamicDNSPassword}
     volumes:
       - ~/.vsdbg:/remote_debugger:rw
