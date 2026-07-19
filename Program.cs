@@ -1,14 +1,13 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Net;
 using System.Net.Http;
-using System.Threading;
+using System.Net.Sockets;
 using System.Threading.Tasks;
-using Newtonsoft.Json;
 using System.Xml.Serialization;
-using System.Xml;
-using System.Linq;
+using Newtonsoft.Json;
 
 namespace NameCheapDNSUpdate
 {
@@ -20,117 +19,100 @@ namespace NameCheapDNSUpdate
         public static int intCheckTimerSEC;  //environmental variable, interval of how long to wait to check again
         public static int intCheckTimerMS;  //same as above just for Milliseconds for the timer
 
-        public static string strPublicIP = "0.0.0.0";  //initial public IP, bogus to force a check at startup.
-
-        public static bool firstRun = true;  //fist run of program
-
+        //the last IP we successfully pushed to the API. null means "unknown", which forces an update.
+        public static string? strLastPublishedIP = null;
 
 
         //API details
         public static string strDomain = "";  //domain to process
         public static List<string> strHosts = new List<string>();  //list of hosts to process
         public static string strDynamicDNSPassword = "";  //api password
-        
 
-        static void Main(string[] args)
+        //one client for the life of the process, a client per request exhausts sockets
+        private static readonly HttpClient httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
+
+
+        static async Task<int> Main(string[] args)
         {
-            Console.WriteLine("Program Begin/FirstRun: " + System.DateTime.Now.ToString() +" UTC");
+            Console.WriteLine("Program Begin/FirstRun: " + Timestamp());
 
             AppDomain.CurrentDomain.UnhandledException += new UnhandledExceptionEventHandler(GlobalExceptionHandler);
 
 
             //startup tests
-            Console.WriteLine("Startup Tests Begin: " + System.DateTime.Now.ToString() + " UTC");
-            bool startupReady = startupCheck();
+            Console.WriteLine("Startup Tests Begin: " + Timestamp());
 
-
-            if (startupReady)
+            if (!startupCheck())
             {
-                //startup 
-                var tempCurrentIP = getPublicIP();
+                //non-zero so a container restart policy sees this as a failure, not a clean exit
+                return 1;
+            }
+
+            //set a domain
+            Domain domainToRun = new Domain();
+
+            domainToRun.fullName = strDomain;
+            domainToRun.Hosts = strHosts;
 
 
-                //set a domain
-                domain domainToRun = new domain();
+            //seed the last known IP from DNS so a restart doesn't force a needless update.
+            //after this we track what we published ourselves, comparing against live DNS every
+            //cycle would re-trigger updates for the length of the record's TTL.
+            strLastPublishedIP = ResolveHostName(domainToRun.Hosts.First(), domainToRun);
 
-                domainToRun.fullName = strDomain;
-                domainToRun.Name = strDomain.Substring(0, strDomain.LastIndexOf("."));
-                domainToRun.TLD = strDomain.Substring(strDomain.LastIndexOf(".") + 1, (strDomain.Length - strDomain.LastIndexOf(".") - 1));
-                
 
-                //check current IP list
+            //planned endless loop for automation
+            while (true)
+            {
 
-                //planned endless loop for automation
-                while (1 == 1)
+                //get the current public IP address
+                Console.WriteLine("Program Run: " + Timestamp());
+                Console.WriteLine("Checking Public IP...");
+
+                var currentIP = await GetPublicIPAsync();
+
+
+                //was there an error geting the public IP?
+                if (currentIP == null)
                 {
-
-                    //get the current public IP address
-                    Console.WriteLine("Program Run: " + System.DateTime.Now.ToString() + " UTC");
-                    Console.WriteLine("Checking Public IP...");
-
-                    //resolve current host name
-                    strPublicIP = ResolveHostName(strHosts.FirstOrDefault(),domainToRun);
-
-                    //get the current public IP
-                    tempCurrentIP = getPublicIP();
-
-
-
-                    //was there an error geting the public IP?
-                    if (tempCurrentIP != "-99")
-                    { 
-
-                        //are they the same? then don't need to do anything Or is it the first run?
-                        if ((strPublicIP != tempCurrentIP)|| firstRun)
-                        {
-                            //reset firstRun
-                            if (!firstRun)
-                            {
-                                Console.WriteLine("IPs do not match, updating DNS");
-                            }
-                            else
-                            {
-                                Console.WriteLine("First Program run, completing program");
-                                firstRun = false;
-                                
-                            }
-
-
-                            //set the IP to the global
-                            strPublicIP = tempCurrentIP;
-
-                           
-                            //if we have hosts
-                            if (strHosts != null)
-                            {
-                               setHostsIP(strHosts, domainToRun, strPublicIP, strDynamicDNSPassword);
-                            }
-
-                            //update hosts DNS
-                            Console.WriteLine("DNS Update Complete");
-
-                            
-
-                        }
-                        else
-                        {
-                            Console.WriteLine("IPs match, nothing to do");
-                        }
+                    Console.WriteLine("Error getting public IP, doing nothing.");
+                }
+                else if (currentIP != strLastPublishedIP)
+                {
+                    if (strLastPublishedIP == null)
+                    {
+                        Console.WriteLine("No known DNS record, updating DNS");
                     }
                     else
                     {
-                        Console.WriteLine("Error getting public IP, doing nothing.");
+                        Console.WriteLine("IPs do not match, updating DNS");
                     }
 
+                    bool updated = await SetHostsIPAsync(domainToRun, currentIP, strDynamicDNSPassword);
 
-                    //sleep for 60 seconds and repeat process
-                    Console.WriteLine("Sleeping for " + intCheckTimerSEC + " seconds.");
-                    Thread.Sleep(intCheckTimerMS);
+                    //leave the state unknown on failure so the next cycle retries
+                    strLastPublishedIP = updated ? currentIP : null;
 
-
+                    Console.WriteLine("DNS Update Complete");
                 }
+                else
+                {
+                    Console.WriteLine("IPs match, nothing to do");
+                }
+
+
+                //sleep for the configured interval and repeat process
+                Console.WriteLine("Sleeping for " + intCheckTimerSEC + " seconds.");
+                await Task.Delay(intCheckTimerMS);
+
+
             }
 
+        }
+
+        static string Timestamp()
+        {
+            return DateTime.UtcNow.ToString("u");
         }
 
         static void GlobalExceptionHandler(object sender, UnhandledExceptionEventArgs e)
@@ -166,53 +148,39 @@ namespace NameCheapDNSUpdate
             }
 
             //strDomain
-            try
-            {
-                strDomain = Environment.GetEnvironmentVariable("domain").Trim(); //split domains on semicolon
-            }
-            catch (Exception e)
-            {
-                returnVal = false;
-                Console.WriteLine("Error Processing domain ENV.");
-            }
+            strDomain = (Environment.GetEnvironmentVariable("domain") ?? "").Trim();
 
             //strHosts
-            try
-            {
-                strHosts = Environment.GetEnvironmentVariable("hosts").Trim().Split(";").ToList(); //split domains on semicolon
-            }
-            catch (Exception e)
-            {
-                returnVal = false;
-                Console.WriteLine("Error Processing hosts ENV.");
-            }
+            strHosts = (Environment.GetEnvironmentVariable("hosts") ?? "")
+                .Split(';')                                     //split hosts on semicolon
+                .Select(host => host.Trim())
+                .Where(host => host.Length > 0)
+                .ToList();
 
             //strDynamicDNSPassword
-            try
-            {
-                strDynamicDNSPassword = Environment.GetEnvironmentVariable("dynamicDNSPassword").Trim();    //api password
-            }
-            catch (Exception e)
-            {
-                returnVal = false;
-                Console.WriteLine("Error Processing strDynamicDNSPassword ENV.");
-            }
-        
+            strDynamicDNSPassword = (Environment.GetEnvironmentVariable("dynamicDNSPassword") ?? "").Trim();  //api password
 
-           
 
             //no blanks
-            if (strDomain == "" )
+            if (strDomain == "")
             {
-                Console.WriteLine("strDomain environment variable cannnot be blank.");
+                Console.WriteLine("domain environment variable cannnot be blank.");
                 returnVal = false;
             }
+            else if (strDomain.LastIndexOf('.') <= 0 || strDomain.EndsWith("."))
+            {
+                //guards the API call, and a domain with no dot used to throw out of Main
+                Console.WriteLine("domain environment variable must be a fully qualified domain, e.g. example.com");
+                returnVal = false;
+            }
+
             if (strHosts.Count == 0)
             {
-                Console.WriteLine("strHosts environment variable cannnot be blank.");
+                Console.WriteLine("hosts environment variable cannnot be blank.");
                 returnVal = false;
             }
-            if (strDynamicDNSPassword == "" || strDynamicDNSPassword == null)
+
+            if (strDynamicDNSPassword == "")
             {
                 Console.WriteLine("dynamicDNSPassword environment variable cannnot be blank.");
                 returnVal = false;
@@ -223,7 +191,7 @@ namespace NameCheapDNSUpdate
             {
                 Console.WriteLine("System Startup Checks failed, please checked the errors and restart.");
             }
-        
+
 
             return returnVal;
 
@@ -245,22 +213,23 @@ namespace NameCheapDNSUpdate
                 return false;
             }
 
+            //upper bound keeps the milliseconds conversion below int.MaxValue
+            if (parsedSeconds < 1 || parsedSeconds > 86400)
+            {
+                Console.WriteLine("intCheckTimerSEC must be between 1 and 86400 seconds.");
+                return false;
+            }
+
             intCheckTimerSEC = parsedSeconds;
             intCheckTimerMS = intCheckTimerSEC * 1000;
 
             return true;
         }
 
-        public static string getPublicIP()
+        public static async Task<string?> GetPublicIPAsync()
         {
 
             //get current public IP
-
-
-            //credentials
-            //NetworkCredential credentials = GetNetworkCredentials();
-
-            string retval = "";
 
             string URL = @"https://api.ipify.org/?format=json";
 
@@ -270,29 +239,38 @@ namespace NameCheapDNSUpdate
             try
             {
                 //get current public IP
-                Task<string> task = Task.Run(async () => await SendRequestGet(URL));
-                task.Wait();
-                string content = task.Result;
-                PublicIP response = JsonConvert.DeserializeObject<PublicIP>(content);
+                string content = await SendRequestGetAsync(URL);
 
-                retval = response.ip;
+                PublicIP? response = JsonConvert.DeserializeObject<PublicIP>(content);
 
-                Console.WriteLine("Public IP: " + response.ip);
+                if (!IsIPv4(response?.ip))
+                {
+                    Console.WriteLine("Public IP get failure: no usable IPv4 address in response.");
+                    return null;
+                }
+
+                Console.WriteLine("Public IP: " + response!.ip);
+
+                return response.ip;
             }
             catch (Exception e)
             {
                 Console.WriteLine("Public IP get failure: " + e.Message);
 
-                retval = "-99";
+                return null;
             }
-
-
-            return retval;
 
 
         }
 
-        public static string ResolveHostName(string host, domain domain)
+        static bool IsIPv4(string? value)
+        {
+            return !string.IsNullOrWhiteSpace(value)
+                && IPAddress.TryParse(value, out var parsed)
+                && parsed.AddressFamily == AddressFamily.InterNetwork;
+        }
+
+        public static string? ResolveHostName(string host, Domain domain)
         {
             IPHostEntry hostEntry;
 
@@ -308,207 +286,122 @@ namespace NameCheapDNSUpdate
 
 
             }
-            catch (Exception e)
+            catch (Exception)
             {
                 Console.WriteLine("resolution of " + hostName + " failed.");
 
-                return "-99";
+                return null;
             }
-            
 
-            if (hostEntry == null)
+
+            //a host can carry several records, and an AAAA record would never match our IPv4
+            //public address, so take the first A record only
+            var address = hostEntry?.AddressList
+                ?.FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetwork);
+
+            if (address == null)
             {
-                Console.WriteLine("resolution of " + hostName + " failed.");
+                Console.WriteLine("resolution of " + hostName + " returned no IPv4 address.");
 
-                return "-99";
-            }
-            else
-            {
-
-                Console.WriteLine(hostName +" resolves to: " + hostEntry.AddressList[0].ToString());
-                return hostEntry.AddressList[0].ToString();
+                return null;
             }
 
-            ////you might get more than one ip for a hostname since 
-            ////DNS supports more than one record
+            Console.WriteLine(hostName + " resolves to: " + address.ToString());
 
-            //if (hostEntry.AddressList.Length > 0)
-            //{
-            //    var ip = hostEntry.AddressList[0];
-            //    Socket s = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.IP);
-            //    s.Connect(ip, 80);
-            //}
-
-            //return hostEntry.AddressList[0].Address.ToString();
+            return address.ToString();
         }
 
 
-        public static void setHostsIP(List<string> hosts, domain domainToRun, string newIPAddress, string appPassword)
+        public static async Task<bool> SetHostsIPAsync(Domain domainToRun, string newIPAddress, string appPassword)
         {
 
+            bool allSucceeded = true;
 
-
-            //query parameters
-            //host=test33&domain=andse.space
-            //URL += "host=" + host = test33 &
-
-            //loop through each domain and set the Update URL
-            //for (int i = 0; i < hosts.Count; i++)
-            foreach(var host in hosts)
+            //loop through each host and set the Update URL
+            foreach (var host in domainToRun.Hosts)
             {
-                Console.WriteLine("Updating host: " + host + domainToRun.fullName);
+                Console.WriteLine("Updating host: " + host + "." + domainToRun.fullName);
 
                 //update the IP for all hosts on the domain
-                string URL = @"https://dynamicdns.park-your-domain.com/update?";
+                string URL = BuildUpdateUrl(host, domainToRun.fullName, newIPAddress, appPassword);
 
-                URL += "host=" + host;
-                URL += "&domain=" + domainToRun.fullName;
-                URL += "&password=" + appPassword;
-                URL += "&ip=" + newIPAddress;
-
-
-                Console.WriteLine("Update DNS URL: " + URL);
+                //never log the real password, container logs are not a secret store
+                Console.WriteLine("Update DNS URL: " + BuildUpdateUrl(host, domainToRun.fullName, newIPAddress, "REDACTED"));
 
                 try
                 {
 
                     //set host lists
-                    Task<string> task = Task.Run(async () => await SendRequestPost(URL));
-                    task.Wait();
-                    string content = task.Result;
+                    string content = await SendRequestGetAsync(URL);
 
-
-                    Interfaceresponse deserializedContentData = new Interfaceresponse();
-
-
+                    Interfaceresponse? deserializedContentData;
 
                     //API response to object
                     XmlSerializer serializer = new XmlSerializer(typeof(Interfaceresponse));
                     using (StringReader reader = new StringReader(content))
                     {
-                        deserializedContentData = (Interfaceresponse)serializer.Deserialize(reader);
-
-                        if (deserializedContentData.ErrCount > 0)
-                        {
-
-                            Console.WriteLine("Update Errors:" + deserializedContentData.Errors);
-                            Console.WriteLine("Full Return Content: " + content);
-                        }
-                        else
-                        {
-                            Console.WriteLine("Update Success");
-                        }
-
-
+                        deserializedContentData = (Interfaceresponse?)serializer.Deserialize(reader);
                     }
 
-
-                    //PostResponse.ApiPostResponse deserializedContentData = new PostResponse.ApiPostResponse();
-
-
-
-                    ////API response to object
-                    //XmlSerializer serializer = new XmlSerializer(typeof(PostResponse.ApiPostResponse));
-                    //using (StringReader reader = new StringReader(content))
-                    //{
-                    //    deserializedContentData = (PostResponse.ApiPostResponse)serializer.Deserialize(reader);
-
-                    //    Console.WriteLine("Update Success Rsponse:" + deserializedContentData.CommandResponse.DomainDNSSetHostsResult.IsSuccess);
-
-                    //}
-
-
-                    Console.WriteLine("Host List Complete");
+                    if (deserializedContentData == null)
+                    {
+                        Console.WriteLine("Update failed: could not read API response.");
+                        allSucceeded = false;
+                    }
+                    else if (deserializedContentData.ErrCount > 0)
+                    {
+                        Console.WriteLine("Update Errors:" + deserializedContentData.Errors);
+                        allSucceeded = false;
+                    }
+                    else
+                    {
+                        Console.WriteLine("Update Success");
+                    }
 
                 }
                 catch (Exception e)
                 {
-                    Console.WriteLine("Error in Post Request: " + e.Message);
+                    Console.WriteLine("Error in Update Request: " + e.Message);
+                    allSucceeded = false;
                 }
 
-
+                Console.WriteLine("Host List Complete");
 
             }
 
-            
+            return allSucceeded;
 
         }
 
-        public static async Task<string> SendRequestGet(string url)
+        static string BuildUpdateUrl(string host, string domainName, string ip, string password)
         {
-
-            HttpClientHandler clientHandler = new HttpClientHandler();
-
-            //ignores SSL errors, we're using a self signed cert in dev.
-            clientHandler.ServerCertificateCustomValidationCallback = (sender, cert, chain, sslPolicyErrors) => { return true; };
-            //clientHandler.Credentials = credentials;
-
-            HttpClient _client = new HttpClient(clientHandler);
-
-
-            string content = "";
-            try
-            {
-
-                HttpResponseMessage response = await _client.GetAsync(url);
-                if (response.IsSuccessStatusCode)
-                {
-                    content = await response.Content.ReadAsStringAsync();
-
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine("\tERROR {0}", ex.Message + ". Inner exception: " + ex.InnerException.Message);
-            }
-
-            return content;
+            //values are escaped, an unencoded '&' or '#' in a password silently corrupts the query
+            return @"https://dynamicdns.park-your-domain.com/update?"
+                + "host=" + Uri.EscapeDataString(host)
+                + "&domain=" + Uri.EscapeDataString(domainName)
+                + "&password=" + Uri.EscapeDataString(password)
+                + "&ip=" + Uri.EscapeDataString(ip);
         }
 
-        public static async Task<string> SendRequestPost(string URL)
+        public static async Task<string> SendRequestGetAsync(string url)
         {
-            //var values = new Dictionary<string, string>
-            //  {
-            //      { "thing1", "hello" },
-            //      { "thing2", "world" }
-            //  };
+            using HttpResponseMessage response = await httpClient.GetAsync(url);
 
-            //var content = new FormUrlEncodedContent(values);
-            //var response = await client.PostAsync("http://www.example.com/recepticle.aspx", content);
+            response.EnsureSuccessStatusCode();
 
-            HttpClient client = new HttpClient();
-
-            var response = await client.GetAsync(URL);   //.PostAsync(URL, null);
-
-            var responseString = await response.Content.ReadAsStringAsync();
-
-            return responseString;
+            return await response.Content.ReadAsStringAsync();
         }
 
-        
+
     }
 
-    
+
     public class PublicIP
     {
-        public string ip { get; set; }
-        public string country { get; set; }
-        public string cc { get; set; }
+        public string? ip { get; set; }
+        public string? country { get; set; }
+        public string? cc { get; set; }
     }
-
-    public class Domain
-    {
-        public string TLD { get; set; }
-        public string SLD { get; set; }
-
-        public string host { get; set; }
-
-        public string dnsType { get; set; }
-
-        public string dns { get; set; }
-    }
-
-    
 
 
 }
